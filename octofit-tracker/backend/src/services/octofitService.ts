@@ -88,11 +88,55 @@ export async function createTeam(input: unknown) {
 }
 
 export async function getLeaderboard() {
-  return [];
+  const leaderboard = await Activity.aggregate([
+    { $group: { _id: '$team', totalPoints: { $sum: '$points' } } },
+    { $sort: { totalPoints: -1, _id: 1 } },
+    { $lookup: { from: 'teams', localField: '_id', foreignField: '_id', as: 'team' } },
+    { $unwind: '$team' },
+    { $project: { _id: 0, teamName: '$team.name', totalPoints: 1 } },
+  ]);
+
+  return leaderboard.map((entry, index) => ({
+    ...entry,
+    rank: index + 1,
+  }));
 }
 
-export async function suggestWorkouts(_userEmail: string) {
-  return Workout.find().limit(1).lean();
+export async function suggestWorkouts(userEmail: string) {
+  const email = typeof userEmail === 'string' ? userEmail.trim() : '';
+  if (!email) {
+    throw Object.assign(new Error('A valid user email is required'), { status: 400 });
+  }
+
+  const user = await User.findOne({ email }).lean();
+  if (!user) {
+    throw Object.assign(new Error('User not found'), { status: 404 });
+  }
+
+  const recentActivities = await Activity.find({ user: user._id }).sort({ occurredAt: -1 }).limit(3).lean();
+  const focusSignals = [user.fitnessGoal, ...recentActivities.map((activity) => activity.type)]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim().toLowerCase());
+
+  const candidates = await Workout.find({ focus: { $in: focusSignals } }).lean();
+  const fallback = await Workout.find().lean();
+  const ordered = candidates.length > 0 ? candidates : fallback;
+
+  const recentType = recentActivities[0]?.type;
+  return ordered
+    .map((workout) => ({
+      ...workout,
+      reason: workout.focus === user.fitnessGoal
+        ? `Matches your ${user.fitnessGoal} goal and recent activity pattern.`
+        : recentType && workout.focus.toLowerCase() === recentType.toLowerCase()
+          ? `Builds on your recent ${recentType} activity pattern.`
+          : `Recommended based on your recent activity pattern.`,
+    }))
+    .sort((left, right) => {
+      const leftScore = Number(left.focus.toLowerCase() === user.fitnessGoal?.toLowerCase()) + Number(left.reason.toLowerCase().includes('recent'));
+      const rightScore = Number(right.focus.toLowerCase() === user.fitnessGoal?.toLowerCase()) + Number(right.reason.toLowerCase().includes('recent'));
+      return rightScore - leftScore;
+    });
 }
 
 export { User };
